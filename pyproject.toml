@@ -1,0 +1,36 @@
+[project]
+name = "browser-use-getting-started"
+version = "0.1.0"
+description = "Getting started with browser-use: a ladder of runnable examples plus a verified Hacker News digest app."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [{ name = "Gopal Saini" }]
+dependencies = [
+    "browser-use==0.13.10",
+    "httpx>=0.28",
+    "python-dotenv>=1.0",
+]
+
+[project.scripts]
+hn-digest = "hn_digest.__main__:main"
+
+[dependency-groups]
+dev = ["pytest>=8", "ruff>=0.6"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/bu_starter", "src/hn_digest"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
