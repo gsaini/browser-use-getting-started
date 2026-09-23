@@ -19,10 +19,11 @@
 
 | | Path | What it teaches |
 | - | ---- | --------------- |
-| 🧪 | [examples/](examples/) | Five small scripts, each adding **one** idea: setup check → first agent → structured output → custom tools → guardrails. |
+| 🧪 | [examples/](examples/) | Six small scripts, each adding **one** idea: setup check → first agent → structured output → custom tools → guardrails → **choosing instead of generating** (Jev + Playwright). |
 | 📰 | [src/hn_digest/](src/hn_digest/) | **HN Digest**, a sample CLI app: an agent reads a Hacker News listing into typed data, and every story is then **checked against the official HN API** before it's written to a Markdown digest. |
 | 📖 | [docs/how-it-works.md](docs/how-it-works.md) | The agent loop (observe → decide → act), what drives cost, and the guardrails worth knowing. |
-| ✅ | [tests/](tests/) | Offline tests (no browser, no network, no API spend) run in CI. |
+| ⚡ | [src/jev_qa/](src/jev_qa/) + [`/qa` skill](.claude/skills/qa/SKILL.md) | **QA runner**: a spec declares the goal, the values that may be typed, the endings you accept and code assertions; **Jev** (TypeSafe's decision model, the one behind Browser Use's jev-ultrafast) picks each action from a numbered element table, **Playwright** executes, code decides the verdict. |
+| ✅ | [tests/](tests/) | Offline tests (no browser, no network, no API spend) run in CI. The QA runner's end-to-end test drives a local page with a fake Jev and is skipped where Chromium isn't installed. |
 
 ## 🧠 browser-use in 30 seconds
 
@@ -51,6 +52,10 @@ uv run python examples/00_check_setup.py    # no API key needed: checks the brow
 
 cp .env.example .env                        # then add your ANTHROPIC_API_KEY
 uv run python examples/01_first_agent.py    # your first agent
+
+# Step 5 and the QA runner use Playwright + Jev instead of browser-use + an LLM:
+uv run playwright install chromium          # Playwright's own Chromium (one-off)
+uv run python examples/05_jev_chooses.py    # needs TYPESAFE_API_KEY in .env
 ```
 
 browser-use uses the Chrome/Chromium already on your machine. If it can't find one, it downloads Chromium through Playwright on first run (or run `uvx playwright install chromium --with-deps` yourself).
@@ -78,6 +83,7 @@ Run them in order; each one adds a single idea to the one before.
 | 2 | [02_structured_output.py](examples/02_structured_output.py) | Get a validated Pydantic object instead of prose | `output_model_schema`, `structured_output` | Yes |
 | 3 | [03_custom_tools.py](examples/03_custom_tools.py) | Let the agent call your Python functions, then check their effect | `Tools`, `@tools.action`, `ActionResult` | Yes |
 | 4 | [04_guardrails.py](examples/04_guardrails.py) | Domain allowlist, secrets the LLM never sees, and checking the outcome yourself | `allowed_domains`, `sensitive_data`, `use_vision=False` | Yes |
+| 5 | [05_jev_chooses.py](examples/05_jev_chooses.py) | The other way round: the model **chooses** from a menu instead of generating; Playwright executes; code decides | `QaSpec`, `jev_qa.run`, TypeSafe `Choice` / `Noul` | Yes (Jev, fractions of a cent) |
 
 Every example caps its run with `max_steps`, so a confused agent stops instead of running up a bill.
 
@@ -131,6 +137,75 @@ Design choices worth copying:
 - **Fenced in.** `allowed_domains=["news.ycombinator.com"]`, the prompt says no logging in or voting, `max_steps` bounds cost, and `use_vision=False` keeps the text-only listing cheap.
 - **Honest about the demo.** In production you'd call the HN API directly. HN is used here because it's public, stable, bot-friendly, and has an official API to grade the agent against. The same approach works for sites that don't.
 
+## ⚡ The QA runner: Jev + Playwright
+
+The examples above ask a language model to **generate** each action. The QA runner is the other design from the Browser Use team, [jev-ultrafast](https://github.com/browser-use/jev-ultrafast): the model **chooses** from a menu the code built. It is a small, goal-driven end-to-end test runner:
+
+- **You (or Claude, via the [`/qa` skill](.claude/skills/qa/SKILL.md)) write a spec** before the run: the goal, the values that may be typed, the endings you accept back, each with its verdict, and exact assertions.
+- **[Jev](https://docs.typesafe.ai/) makes one typed decision per step**: which operation, which numbered element, which prepared value, plus every declared outcome as a yes/no question, all in **one request** (about 0.3 s). Jev cannot invent an action that is not on the page and never writes text.
+- **Playwright executes** the pick against its own Chromium, then observes again once the DOM is quiet.
+- **Code decides**: a run ends in exactly one declared outcome (or a typed status), and a pass must also survive the `assert` block.
+
+```bash
+uv run playwright install chromium                    # once: Playwright's own Chromium
+uv run jev-qa qa/specs/login.json --check             # validate a spec: no browser, no API
+uv run jev-qa qa/specs/login.json                     # needs TYPESAFE_API_KEY in .env
+uv run jev-qa qa/specs/login-wrong-password.json      # a negative test: the rejection is the pass
+uv run jev-qa qa/specs/login.json --headed            # watch it
+```
+
+A spec ([qa/specs/login.json](qa/specs/login.json)):
+
+```json
+{
+  "id": "login",
+  "start_url": "https://the-internet.herokuapp.com/login",
+  "goal": "Log in with the prepared username and password. Done when the secure area page is shown.",
+  "data": { "username": "tomsmith", "password": "${DEMO_PASS:-SuperSecretPassword!}" },
+  "secrets": ["password"],
+  "outcomes": {
+    "logged_in": { "when": "The page heading says 'Secure Area'.", "verdict": "pass" },
+    "rejected":  { "when": "A flash message says the username or password is invalid.", "verdict": "bug" }
+  },
+  "assert": [{ "url_matches": "**/secure" }, { "text_contains": "You logged into a secure area!" }]
+}
+```
+
+The command prints a summary and writes `result.json`, `trace.json` and step screenshots to `qa/runs/<id>/<timestamp>/`. The format, with sample data:
+
+```text
+login · PASS · status passed · outcome logged_in · 4 steps · 4 Jev requests · 6.1s
+  evidence: "Secure Area"
+  assert ok  url_matches '**/secure' (url is https://the-internet.herokuapp.com/secure)
+  assert ok  text_contains 'You logged into a secure area!' (found in page text)
+   1. TYPE_TEXT (0.94) -> [1] textbox 'Username' value=username
+   2. TYPE_TEXT (0.96) -> [2] textbox 'Password' value=password
+   3. CLICK (0.97) -> [3] button 'Login'
+   4. WAIT (0.61)   (not executed)  · outcome logged_in seen (0.97)
+```
+
+**Exit codes:** `0` pass · `1` any other verdict · `2` never a verdict (spec problem, missing key, Chromium not installed, start URL did not load). Every ending is a typed `status` (`passed`, `outcome`, `assert_failed`, `done_unverified`, `blocked`, `low_confidence`, `stuck`, `budget_exhausted`, `off_host`, `error`) with a `suggested_verdict` when it is not a declared outcome. The [`/qa` skill](.claude/skills/qa/SKILL.md) has the table and the judging rubric.
+
+### How it's built
+
+```text
+src/jev_qa/
+├── spec.py      QaSpec: goal, data, secrets, outcomes (when + verdict), assert; ${VAR} substitution
+├── observe.py   one browser call -> numbered element table (role, name, value) + visible text
+├── policy.py    the questions Jev is asked (Choice + Noul, speculative fan-out) and answer validation
+├── runner.py    observe -> ask -> validate -> execute -> settle; assertions; result.json + trace.json
+├── report.py    the terminal summary
+└── __main__.py  the `jev-qa` command
+```
+
+Design choices worth copying:
+
+- **Choose, don't generate.** Each step Jev picks an operation and an element index from what the page really shows, tagged `data-jev-idx`. A malformed answer is rejected against exactly the menu that was offered, so it ends in "no action", never a wrong action ([policy.py](src/jev_qa/policy.py)).
+- **`DONE` is a claim.** The verdict comes from a declared outcome Jev saw on the page *and* assertions that held in code. A `DONE` without a visible outcome is `done_unverified`, not a pass.
+- **Secrets never reach the model.** Values listed under `secrets` appear as `<secret>` in Jev's state and in traces; a password field reports `(filled)`. Jev only chooses *which* prepared value goes *where*; the runner types it.
+- **Deterministic given the answers.** The trace records every state and every answer with probabilities and confidence, which is what makes it evidence.
+- **Cheap and fast.** Jev is priced per input token ($0.042 per million at the time of writing) and answers in a few hundred milliseconds; a login run is a handful of requests.
+
 ## 🤖 Choosing a model
 
 All examples and the app get their model from [src/bu_starter/llm.py](src/bu_starter/llm.py), configured in `.env`:
@@ -140,6 +215,8 @@ All examples and the app get their model from [src/bu_starter/llm.py](src/bu_sta
 | `ANTHROPIC_API_KEY=…` *(default)* | **Claude Opus 5** (`claude-opus-5`). If Opus 5 declines a request, the API retries it on `claude-opus-4-8` (server-side fallback). |
 | `+ ANTHROPIC_MODEL=claude-sonnet-5` | Any Claude model ID, e.g. `claude-sonnet-5` or `claude-haiku-4-5`, which cost less per step. |
 | `LLM_PROVIDER=browser-use` + `BROWSER_USE_API_KEY=…` | Browser Use's own **BU2** model (`bu-2-0`), tuned for browser tasks. |
+
+Example 05 and the QA runner use no LLM at all: they call Jev through `TYPESAFE_API_KEY` ([get a key](https://console.typesafe.ai/keys)); `TYPESAFE_MODEL` picks the version (default `jev-latest`).
 
 browser-use also supports OpenAI, Gemini, Groq, Ollama (local) and more. To use one, add its `Chat*` class in `llm.py`; nothing else changes. Compare models by **cost per completed task**: a cheaper model that needs more steps or retries isn't actually cheaper.
 
@@ -155,6 +232,7 @@ browser-use also supports OpenAI, Gemini, Groq, Ollama (local) and more. To use 
 
 ```bash
 uv run pytest -q          # offline: no browser, no network, no API spend
+                          # (+ a local end-to-end run of the QA runner when Playwright's Chromium is installed)
 uv run ruff check . && uv run ruff format --check .
 ```
 
@@ -169,11 +247,15 @@ CI runs the same commands on every push.
 | Agent stops at the step limit | Make the task more specific, or raise `max_steps` / `--max-steps` a little. |
 | A site shows a CAPTCHA or blocks the agent | Expected on some sites. Try a different site, or look at [Browser Use Cloud](https://docs.browser-use.com/cloud/browser/quickstart) stealth browsers. |
 | HN Digest exits with code `1` | Read the "Verification notes" in the digest: the agent misread or invented a story. That's the check doing its job. |
+| `could not run: Chromium did not launch` (example 05 / `jev-qa`) | `uv run playwright install chromium`. browser-use and Playwright each use their own Chromium. |
+| `could not run: TypeSafe client could not start` | Add `TYPESAFE_API_KEY` to `.env` ([console.typesafe.ai/keys](https://console.typesafe.ai/keys)). |
+| `jev-qa` ends `blocked`, `low_confidence` or `done_unverified` | Usually the spec: a value missing from `data`, a vague `goal`, or a `when` that isn't one visible fact. The [`/qa` skill](.claude/skills/qa/SKILL.md) has the rubric. |
 
 ## 📚 Learn more
 
 - [browser-use docs](https://docs.browser-use.com/open-source/introduction) · [all Agent parameters](https://docs.browser-use.com/open-source/customize/agent/all-parameters) · [all Browser parameters](https://docs.browser-use.com/open-source/customize/browser/all-parameters) · [official examples](https://github.com/browser-use/browser-use/tree/main/examples)
-- [Jev Ultrafast study note](https://github.com/gsaini/awesome-software-engineering/blob/main/notes/jev-ultrafast.md): a different design from the Browser Use team, where the model **chooses** an indexed action instead of generating one.
+- [Jev Ultrafast study note](https://github.com/gsaini/awesome-software-engineering/blob/main/notes/jev-ultrafast.md): a different design from the Browser Use team, where the model **chooses** an indexed action instead of generating one. Example 05 and the QA runner are that idea, paired with Playwright.
+- [browser-use/jev-ultrafast](https://github.com/browser-use/jev-ultrafast) · [TypeSafe docs](https://docs.typesafe.ai/) (Jev, `Choice` / `Score` / `Noul`, [speculative fan-out](https://docs.typesafe.ai/patterns/fan-out)) · [Python SDK](https://docs.typesafe.ai/sdk/python/)
 - [Building an Agent Evaluator](https://github.com/gsaini/awesome-software-engineering/blob/main/notes/building-agent-evaluators.md): why `done` is a claim and how to grade it.
 
 ## 📜 License

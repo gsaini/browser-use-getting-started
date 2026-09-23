@@ -1,0 +1,26 @@
+{
+  "id": "login",
+  "start_url": "https://the-internet.herokuapp.com/login",
+  "goal": "Log in with the prepared username and password. Done when the secure area page is shown.",
+  "data": {
+    "username": "tomsmith",
+    "password": "${DEMO_PASS:-SuperSecretPassword!}"
+  },
+  "secrets": ["password"],
+  "outcomes": {
+    "logged_in": {
+      "when": "The page heading says 'Secure Area'. A message says you logged into a secure area.",
+      "verdict": "pass"
+    },
+    "rejected": {
+      "when": "A flash message says the username or password is invalid.",
+      "verdict": "bug",
+      "note": "The demo credentials printed on the login page were rejected."
+    }
+  },
+  "assert": [
+    { "url_matches": "**/secure" },
+    { "text_contains": "You logged into a secure area!" },
+    { "element_present": "a[href='/logout']" }
+  ]
+}
